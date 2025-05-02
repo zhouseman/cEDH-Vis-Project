@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>cEDH Commanders Dashboard</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Verdana, sans-serif; margin:0; padding:20px; background:#121212; color:#eee; }
+    h1 { text-align:center; margin-bottom:10px; }
+    .info-panel, .filter-container, .chart-container, .list-container {
+      background:#1e1e1e;
+      box-shadow:0 2px 6px rgba(255,255,255,0.1);
+    }
+    .filter-container label { display:block; margin:6px 0 2px; }
+    .filter-container input { width:100%; background:#333; color:#eee; border:1px solid #555; }
+    .chart-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:10px; }
+    /* now each chart occupies its own grid cell */
+    .chart-title { text-align:center; font-weight:bold; margin-bottom:8px; color:#eee; }
+    #commanderSearch { width:100%; padding:8px; margin-bottom:10px; background:#333; color:#eee; border:1px solid #555; border-radius:4px; }
+    #commanderList { list-style:none; padding:0; margin:0; max-height:300px; overflow-y:auto; border:1px solid #ddd; border-radius:4px; }
+    .commander-item { padding:8px 12px; cursor:pointer; border-bottom:1px solid #444; color:#ddd; transition:background 0.2s; }
+    .commander-item:last-child { border-bottom:none; }
+    .commander-item:hover { background:#333; }
+    .commander-item.active { background:#007bff; color:#fff; }
+    .slice { stroke:#fff; stroke-width:1px; }
+    .dot { fill:steelblue; fill-opacity:0.7; cursor:pointer; }
+    .dot.highlight { fill:orange; fill-opacity:1; }
+    .bar { fill:#76b7b2; }
+    .axis path, .axis line { stroke:#555; }
+    .axis text { font-size:10px; fill:#bbb; }
+    .link-container { margin-top:20px; text-align:center; }
+    .link-container a { color:#1e90ff; margin:0 10px; text-decoration:underline; }
+    .legend { font-size:12px; }
+    .legend-item { cursor:pointer; }
+    .legend-item.hidden rect { fill-opacity:0.3; }
+    #histogramChart .bar { fill:#69b3a2; }
+    #histogramChart .bar:hover { fill:#40a286; }
+    /* radar axis and area styling */
+    .radar-area { fill: #76b7b2; fill-opacity: 0.5; }
+    .radar-stroke { stroke: #76b7b2; stroke-width: 2px; fill: none; }
+    .radar-axis { stroke: #555; }
+    .radar-label { font-size:10px; fill:#bbb; }
+  </style>
+</head>
+<body>
+
+  <h1>cEDH Commanders Dashboard</h1>
+
+  <div class="chart-grid">
+    <div class="chart-container power-chart">
+      <!-- Power Curve -->
+      <div class="chart-title">Win‑Rate Distribution by Color Identity</div>
+      <div id="boxPlotChart"></div>
+      <div class="chart-title">Win‑Rate Histogram (click bar to filter)</div>
+      <div id="histogramChart"></div>
+      <button id="clearHistFilter">Clear Histogram Filter</button>
+    </div>
+    <div class="chart-container radar-chart">
+      <!-- Commander Metrics Radar -->
+      <div class="chart-title">Commander Metrics Radar</div>
+      <div id="radarChart"></div>
+    </div>
+    <div class="chart-container">
+      <!-- Scatter -->
+      <div class="chart-title">Deck Appearances vs. Win Rate</div>
+      <div id="scatterChart"></div>
+    </div>
+    <div class="chart-container">
+      <!-- Color Pie -->
+      <div class="chart-title">Color Representation in cEDH Decks</div>
+      <div id="colorPieChart"></div>
+      <button id="clearColorFilter">Clear Color Filter</button>
+    </div>
+  </div>
+
+  <div class="list-container">
+    <div class="filter-container">
+      <label>Min Appearances: <span id="minAppLabel">0</span></label>
+      <input type="range" id="minAppearances" min="0" value="0">
+      <label>Max Appearances: <span id="maxAppLabel">0</span></label>
+      <input type="range" id="maxAppearances" min="0" value="0">
+      <label>Min Win Rate (%): <span id="minWinLabel">0%</span></label>
+      <input type="range" id="minWinrate" min="0" max="100" value="0">
+      <label>Max Win Rate (%): <span id="maxWinLabel">100%</span></label>
+      <input type="range" id="maxWinrate" min="0" max="100" value="100">
+      <button id="resetFilters">Reset Filters</button>
+    </div>
+    <div class="info-panel" id="commanderInfo">Select a commander from the list below to view stats.</div>
+    <input type="text" id="commanderSearch" placeholder="Search commanders..." />
+    <ul id="commanderList"></ul>
+  </div>
+
+  <!-- external links area -->
+  <div class="link-container" id="externalLinks">
+    <a href="https://example.com/first" target="_blank">First Link</a>
+    <a href="https://example.com/second" target="_blank">Second Link</a>
+  </div>
+
+  <script>
+    d3.csv("Metagame_Commanders_Combined.csv").then(data => {
+      data.forEach(d=>{
+        d.Appearances=+d.Appearances; d.Wins=+d.Wins;
+        d.Winrate=+d["Avg Winrate"]; d.Drawrate=+d["Avg Drawrate"];
+        d.Best=+d["Best Standing"]; d.Worst=+d["Worst Standing"];
+        d.Identity=d.Identity.trim();
+      });
+
+      const colors=["W","U","B","R","G"];
+      const names={W:"White",U:"Blue",B:"Black",R:"Red",G:"Green"};
+      const counts={W:0,U:0,B:0,R:0,G:0};
+      data.forEach(d=> colors.forEach(c=>{ if(d.Identity.includes(c)) counts[c]+=d.Appearances;}));
+      const pieData=colors.map(c=>({key:c,name:names[c],total:counts[c]}));
+      const totalApps=d3.sum(pieData,d=>d.total);
+
+      const winsByMap=d3.rollup(data, v=>d3.sum(v,d=>d.Wins), d=>d.Identity);
+      const winsByIdentity=Array.from(winsByMap,([identity,total])=>({identity,total}))
+                            .sort((a,b)=>b.total-a.total);
+
+      const list=d3.select("#commanderList");
+      data.sort((a,b)=>d3.ascending(a["Commander/s"],b["Commander/s"]));
+      const items=list.selectAll("li").data(data).enter().append("li")
+        .attr("class","commander-item")
+        .text(d=>d["Commander/s"])
+        .on("click",(_,d)=>{ items.classed("active",x=>x["Commander/s"]===d["Commander/s"]); updateCommanderInfo(d); highlightCommander(d["Commander/s"]); });
+      items.filter((_,i)=>i===0).classed("active",true);
+      d3.select("#commanderSearch").on("input", function() {
+        const term = this.value.toLowerCase();
+        const minA = +d3.select("#minAppearances").property("value"),
+              maxA = +d3.select("#maxAppearances").property("value"),
+              minW = +d3.select("#minWinrate").property("value")/100,
+              maxW = +d3.select("#maxWinrate").property("value")/100;
+        items.style("display", d =>
+          d["Commander/s"].toLowerCase().includes(term) &&
+          d.Appearances >= minA && d.Appearances <= maxA &&
+          d.Winrate     >= minW   && d.Winrate     <= maxW
+            ? null : "none"
+        );
+        // pick first visible and update spider + info
+        const vis = items.filter(function() {
+          return d3.select(this).style("display") !== "none";
+        });
+        if (!vis.empty()) {
+          const sel = vis.datum();
+          updateCommanderInfo(sel);
+          highlightCommander(sel["Commander/s"]);
+        }
+      });
+
+      function updateCommanderInfo(d){
+        d3.select("#commanderInfo").text(
+          `Commander: ${d["Commander/s"]} | Identity: ${d.Identity}` +
+          ` | Appearances: ${d.Appearances} | Wins: ${d.Wins}` +
+          ` | Win Rate: ${(d.Winrate*100).toFixed(1)}%` +
+          ` | Draw Rate: ${(d.Drawrate*100).toFixed(1)}%` +
+          ` | Best Standing: ${d.Best}` +
+          ` | Worst Standing: ${d.Worst}`
+        );
+      }
+
+      const pieW=350,pieH=250;
+      const pieSvg=d3.select("#colorPieChart").append("svg").attr("width",pieW).attr("height",pieH);
+      const pg=pieSvg.append("g").attr("transform",`translate(${pieW/2},${pieH/2})`);
+      const pieGen=d3.pie().value(d=>d.total).sort(null);
+      const arcGen=d3.arc().innerRadius(0).outerRadius(Math.min(pieW,pieH)/2-20);
+      const colorScale=d3.scaleOrdinal().domain(colors).range(["#d9d9d9","#3498db","#3e3e3e","#e74c3c","#27ae60"]);
+      const slices=pg.selectAll("path").data(pieGen(pieData)).enter().append("path")
+        .attr("class","slice").attr("d",arcGen).attr("fill",d=>colorScale(d.data.key));
+      pg.selectAll("text").data(pieGen(pieData)).enter().append("text")
+        .attr("class","slice-label")                        // add label class
+        .attr("transform",d=>`translate(${arcGen.centroid(d)})`).attr("dy","0.35em")
+        .attr("text-anchor","middle").style("font-size","10px").style("fill","#000")
+        .text(d=>`${((d.data.total/totalApps)*100).toFixed(1)}%`);
+
+      // slice click toggles filter
+      slices.on("click",(e,d)=>{
+        colorFilter = d.data.key;
+        slices.transition().duration(300)
+          .style("opacity", s=> s.data.key===colorFilter ? 1 : 0.3);
+        updateColorFilter();
+      });
+
+      // clear button
+      d3.select("#clearColorFilter").on("click",()=>{
+        colorFilter = null;
+        slices.transition().duration(300).style("opacity",1);
+        updateColorFilter();
+      });
+
+      // apply color filter to scatter, box, histogram
+      function updateColorFilter(){
+        // layer color filter on top of current slider range
+        const minA = +d3.select("#minAppearances").property("value"),
+              maxA = +d3.select("#maxAppearances").property("value"),
+              minW = +d3.select("#minWinrate").property("value")/100,
+              maxW = +d3.select("#maxWinrate").property("value")/100;
+        let filtered = data.filter(d =>
+          d.Appearances >= minA && d.Appearances <= maxA &&
+          d.Winrate     >= minW && d.Winrate     <= maxW
+        );
+        if(colorFilter) filtered = filtered.filter(d=>d.Identity.includes(colorFilter));
+        scg.selectAll("circle.dot")
+          .style("display", d=> filtered.includes(d) ? null : "none");
+        renderBoxPlot(filtered);
+        renderHistogram(filtered);
+      }
+
+      // render a radar/spider chart for selected commander
+      function renderRadarChart(cmd) {
+        const metrics = [
+          {axis:"Appearances",   value: cmd.Appearances},
+          {axis:"Wins",           value: cmd.Wins},
+          {axis:"Win Rate",       value: cmd.Winrate},
+          {axis:"Draw Rate",      value: cmd.Drawrate},
+          {axis:"Best Standing",  value: 1/cmd.Best},   // invert so higher better
+          {axis:"Worst Standing", value: 1/cmd.Worst}
+        ];
+        const N = metrics.length,
+              width = 450, height = 450,
+              radius = Math.min(width, height)/2 - 40;
+        // scale each metric to [0,1]
+        const maxVals = {
+          Appearances:    d3.max(data, d=>d.Appearances),
+          Wins:            d3.max(data, d=>d.Wins),
+          "Win Rate":      1,
+          "Draw Rate":     1,
+          "Best Standing": 1, // after invert
+          "Worst Standing":1
+        };
+        const rScale = d3.scaleLinear().range([0, radius]).domain([0,1]);
+        const angleSlice = Math.PI * 2 / N;
+        const svg = d3.select("#radarChart").html("")
+          .append("svg").attr("width", width).attr("height", height)
+          .append("g").attr("transform",`translate(${width/2},${height/2})`);
+        // axes
+        for(let i=0;i<N;i++){
+          const angle = angleSlice * i - Math.PI/2;
+          svg.append("line")
+            .attr("class","radar-axis")
+            .attr("x1",0).attr("y1",0)
+            .attr("x2", Math.cos(angle)*radius)
+            .attr("y2", Math.sin(angle)*radius);
+          svg.append("text")
+            .attr("class","radar-label")
+            .attr("x", Math.cos(angle)*(radius+10))
+            .attr("y", Math.sin(angle)*(radius+10))
+            .attr("text-anchor","middle")
+            .text(metrics[i].axis);
+        }
+        // area path
+        const line = d3.lineRadial()
+          .radius((d,i)=> rScale(d.value / maxVals[d.axis]))
+          .angle((d,i)=> i * angleSlice);
+        svg.append("path")
+          .datum(metrics)
+          .attr("class","radar-area")
+          .attr("d", line);
+        svg.append("path")
+          .datum(metrics)
+          .attr("class","radar-stroke")
+          .attr("d", line);
+      }
+
+      const scatterW=450,scatterH=300;
+      const scatterSvg=d3.select("#scatterChart").append("svg").attr("width",scatterW).attr("height",scatterH);
+      const sms={top:20,right:20,bottom:40,left:50}, swp=scatterW-sms.left-sms.right, shp=scatterH-sms.top-sms.bottom;
+      const scg=scatterSvg.append("g").attr("transform",`translate(${sms.left},${sms.top})`);
+      const xS=d3.scaleLinear().domain([0,d3.max(data,d=>d.Appearances)]).nice().range([0,swp]);
+      const yS=d3.scaleLinear().domain([0,d3.max(data,d=>d.Winrate)]).nice().range([shp,0]);
+      scg.append("g").attr("transform",`translate(0,${shp})`).call(d3.axisBottom(xS));
+      scg.append("g").call(d3.axisLeft(yS).ticks(5,"~%"));
+      scg.append("text").attr("x",swp/2).attr("y",shp+30).attr("text-anchor","middle").style("fill","#fff").text("Appearances");
+      scg.append("text")
+        .attr("transform","rotate(-90)")
+        .attr("x",-shp/2).attr("y",-40)
+        .attr("text-anchor","middle")
+        .style("fill","#fff")
+        .text("Win Rate");
+      const identities = Array.from(new Set(data.map(d=>d.Identity)));
+      const colorScale2 = d3.scaleOrdinal().domain(identities)
+        .range(d3.schemeCategory10);
+      const seriesVisible = {};
+      identities.forEach(id=> seriesVisible[id] = true);
+      scg.selectAll("circle").data(data).enter().append("circle")
+        .attr("class",d=>`dot series-${d.Identity}`)
+        .attr("cx",d=>xS(d.Appearances)).attr("cy",d=>yS(d.Winrate)).attr("r",4)
+        .attr("fill",d=>colorScale2(d.Identity))
+        .on("click",(event,d)=>{ items.classed("active",x=>x["Commander/s"]===d["Commander/s"]); updateCommanderInfo(d); highlightCommander(d["Commander/s"]); })
+        .append("title").text(d=>`${d["Commander/s"]}\n${(d.Winrate*100).toFixed(1)}%`);
+      const legend = scatterSvg.append("g")
+        .attr("class","legend")
+        .attr("transform",`translate(${sms.left+swp+20},${sms.top})`);
+      identities.forEach((id,i) => {
+        const item = legend.append("g")
+          .attr("class","legend-item")
+          .attr("data-id",id)
+          .attr("transform",`translate(0,${i*20})`)
+          .on("click", function() {
+            seriesVisible[id] = !seriesVisible[id];
+            d3.select(this).classed("hidden", !seriesVisible[id]);
+            scg.selectAll(`.series-${id}`)
+              .style("display", seriesVisible[id] ? null : "none");
+          });
+        item.append("rect")
+          .attr("width",12).attr("height",12)
+          .attr("fill", colorScale2(id));
+        item.append("text")
+          .attr("x",16).attr("y",10)
+          .text(id);
+      });
+
+      function renderBoxPlot(filtered) {
+        const groups = Array.from(
+          d3.group(filtered, d=>d.Identity),
+          ([key, vals]) => {
+            const rates = vals.map(d=>d.Winrate).sort(d3.ascending);
+            const q1 = d3.quantile(rates,0.25),
+                  median = d3.quantile(rates,0.5),
+                  q3 = d3.quantile(rates,0.75),
+                  iqr = q3 - q1,
+                  min = Math.max(0, q1 - 1.5*iqr),
+                  max = Math.min(1, q3 + 1.5*iqr);
+            return {key,q1,median,q3,min,max};
+          }
+        );
+        const m = {top:20,right:20,bottom:60,left:50},   // increased bottom
+              w = 650 - m.left - m.right,
+              h = 300 - m.top - m.bottom;
+        const svg = d3.select("#boxPlotChart").html("")
+          .append("svg")
+            .attr("width", w + m.left + m.right)
+            .attr("height", h + m.top + m.bottom)
+          .append("g")
+            .attr("transform",`translate(${m.left},${m.top})`);
+        const x = d3.scaleBand()
+            .domain(groups.map(d=>d.key))
+            .range([0,w]).padding(0.4);
+        const y = d3.scaleLinear().domain([0,1]).range([h,0]);
+        svg.append("g")
+            .attr("transform",`translate(0,${h})`)
+            .call(d3.axisBottom(x))
+            .selectAll("text")
+              .attr("transform","rotate(-45)")
+              .style("text-anchor","end")
+              .attr("dx","-0.5em")
+              .attr("dy","0.5em");
+        svg.append("g").call(d3.axisLeft(y).ticks(5,"~%"));
+        svg.selectAll("g.box").data(groups).enter().append("g")
+          .attr("class","box")
+          .attr("transform", d=>`translate(${x(d.key)},0)`)
+          .each(function(d) {
+            const g = d3.select(this);
+            // whiskers
+            g.append("line")
+              .attr("x1", x.bandwidth()/2).attr("x2", x.bandwidth()/2)
+              .attr("y1", y(d.min)).attr("y2", y(d.max))
+              .attr("stroke","#ddd");
+            // box
+            g.append("rect")
+              .attr("x",0).attr("width",x.bandwidth())
+              .attr("y",y(d.q3)).attr("height",y(d.q1)-y(d.q3))
+              .attr("fill","#444").attr("stroke","#eee");
+            // median
+            g.append("line")
+              .attr("x1",0).attr("x2",x.bandwidth())
+              .attr("y1",y(d.median)).attr("y2",y(d.median))
+              .attr("stroke","#fff");
+          });
+      }
+
+      function renderHistogram(filtered) {
+        const vals = filtered.map(d=>d.Winrate),
+              bins = d3.bin().thresholds(10)(vals),
+              w=450, h=200, m={top:20,right:20,bottom:30,left:40};
+        const x = d3.scaleLinear().domain([0,1]).range([0,w]);
+        const y = d3.scaleLinear().domain([0,d3.max(bins,d=>d.length)]).range([h,0]);
+        const svg = d3.select("#histogramChart").html("")
+          .append("svg").attr("width",w+m.left+m.right).attr("height",h+m.top+m.bottom)
+          .append("g").attr("transform",`translate(${m.left},${m.top})`);
+        svg.append("g").attr("transform",`translate(0,${h})`).call(d3.axisBottom(x).ticks(5,"~%"));
+        svg.append("g").call(d3.axisLeft(y));
+        svg.selectAll("rect").data(bins).enter().append("rect")
+          .attr("class","bar")
+          .attr("x",d=>x(d.x0)).attr("y",d=>y(d.length))
+          .attr("width",d=>x(d.x1)-x(d.x0)-1).attr("height",d=>h-y(d.length))
+          .on("click",(e,bin)=> {
+            // filter scatter & box‑plot by selected bin within current filtered set
+            scg.selectAll("circle")
+              .style("opacity", d=> d.Winrate>=bin.x0 && d.Winrate<bin.x1 ? 1 : 0.2);
+            renderBoxPlot(filtered.filter(d=>d.Winrate>=bin.x0 && d.Winrate<bin.x1));
+          });
+      }
+
+      // clear histogram filter button
+      d3.select("#clearHistFilter").on("click", () => {
+        scg.selectAll("circle").style("opacity", null);
+        updateFilters();  // rerun current slider & color settings
+      });
+
+      const maxAppearance = d3.max(data, d=>d.Appearances);
+      d3.select("#minAppearances").attr("max", maxAppearance);
+      d3.select("#maxAppearances").attr("max", maxAppearance).property("value", maxAppearance);
+      d3.select("#minWinrate").property("value", 0);
+      d3.select("#maxWinrate").property("value", 100);
+
+      function updateFilters(){
+        const minA = +d3.select("#minAppearances").property("value");
+        const maxA = +d3.select("#maxAppearances").property("value");
+        const minW = +d3.select("#minWinrate").property("value")/100;
+        const maxW = +d3.select("#maxWinrate").property("value")/100;
+        d3.select("#minAppLabel").text(minA);
+        d3.select("#maxAppLabel").text(maxA);
+        d3.select("#minWinLabel").text((minW*100).toFixed(0)+"%");
+        d3.select("#maxWinLabel").text((maxW*100).toFixed(0)+"%");
+
+        const filtered = data.filter(d =>
+          d.Appearances >= minA && d.Appearances <= maxA &&
+          d.Winrate >= minW && d.Winrate <= maxW
+        );
+        scg.selectAll("circle")
+          .style("display", d =>
+            d.Appearances >= minA && d.Appearances <= maxA &&
+            d.Winrate >= minW && d.Winrate <= maxW ? null : "none"
+          );
+        renderBoxPlot(filtered);
+        renderHistogram(filtered);
+        updateColorFilter();  // reapply color filter if set
+
+        // auto–refresh commander list
+        const term = d3.select("#commanderSearch").property("value").toLowerCase();
+        items.style("display", d =>
+          d["Commander/s"].toLowerCase().includes(term) &&
+          d.Appearances >= minA && d.Appearances <= maxA &&
+          d.Winrate     >= minW     && d.Winrate     <= maxW
+            ? null : "none"
+        );
+      }
+      d3.selectAll("#minAppearances,#maxAppearances,#minWinrate,#maxWinrate").on("input", updateFilters);
+      // reset slider filters button
+      d3.select("#resetFilters").on("click", () => {
+        d3.select("#minAppearances").property("value", 0);
+        d3.select("#maxAppearances").property("value", maxAppearance);
+        d3.select("#minWinrate").property("value", 0);
+        d3.select("#maxWinrate").property("value", 100);
+        updateFilters();
+      });
+
+      function highlightCommander(name) {
+        const cmd = data.find(d=>d["Commander/s"]===name);
+        const idCols = cmd.Identity.split("");
+
+        // pie‐slice highlight
+        slices.transition().duration(300)
+          .style("opacity", s => idCols.includes(s.data.key) ? 1 : 0.2);
+        pg.selectAll(".slice-label")
+          .style("fill", d =>
+            (!idCols.includes(d.data.key) || d.data.key === "B") ? "#fff" : "#000"
+          );
+
+        // restore dot highlight & size
+        scg.selectAll(".dot")
+          .classed("highlight", d=>d["Commander/s"]===name)
+          .attr("r", d=> d["Commander/s"]===name ? 8 : 4)
+          .filter(d=>d["Commander/s"]===name)
+          .raise();
+
+        renderRadarChart(cmd);
+      }
+
+      renderRadarChart(data[0]);
+      renderBoxPlot(data);
+      renderHistogram(data);
+      updateColorFilter();
+      updateFilters();
+      updateCommanderInfo(data[0]);
+      highlightCommander(data[0]["Commander/s"]);
+    }).catch(err=>console.error("CSV load error:",err));
+  </script>
+</body>
+</html>
